@@ -1,0 +1,1187 @@
+
+/**********************************************************************
+ * LED LAVA LAMP program				               ESP12F (ESP8266)
+ * Version 2.0   TJL				          Tom LeMense, January 2023
+ **********************************************************************
+ *
+ * This program uses an ESP12F to control a string of APA102 RGB LED's.
+ * There is a WiFi Configuration Manger to allow connectivity via
+ * webpage control. There are several "modes" of operation, and these
+ * can be adjusted by either a pushbutton input or via the webpage.
+ *
+ * The RGB LED's I used are SK9822 which are improved APA102.
+ * This project uses Arduino enviroment, and IDE is PlatformIO
+ *
+ * There are several "modes" of operation of the LED Lava Lamp, which
+ * may be cycled through using the onboard pushbutton input or via
+ * the webpage.  A brief (less than 4 seconds) activation of the
+ * button will change modes, whereas a longer (more than 4 seconds)
+ * button press will 'program' the current RGB color as
+ * a "custom color" into EEPROM.  The modes are as follows:
+ *
+ * MODE 0		Fast RGBW color cycling 
+ * MODE 1		Medium RGBW color cycling 
+ * MODE 2		Slow RGBW color cycling (1/4 the speed of MODE 0)
+ * MODE 3		Glacial RGBW color cycling (1/4 the speed of MODE 1)
+ * MODE 4..7	Static RGBW "custom color" (useful for ambient lighting)
+ * MODE 8		Full brightness R-G-B-W "lamp" mode
+ *
+ * Each of the modes can have it's own "dimming" value, a means to
+ * scale the peak brightness of the LED array. For example, it's quite 
+ * nice to have the glacial mode (3) be quite dim, for night-light use.
+ * The dimming value is adjustable via webpage only, otherwise each mode
+ * has a default dimming value associated with it in the configuration
+ * file.
+ *
+ * A long press of the pushbutton during power-on will flush the WiFi
+ * configuration, so that the next startup will invoke the WiFi manager
+ * to allow new SSID and PW information to be entered.
+ *
+ * Each color has a 16-bit phase accumulator associated with it.  Each
+ * increment (e.g. INCRP1) and phase accumulator pair (e.g. PHASE1) are
+ * added together.  To derive a PWM value, the 10 least significant bits
+ * of the phase accumulator value are discarded, and the uppermost 7 bits
+ * are used as an index into a 128-entry Sine lookup table.  The entry in
+ * the Sine table is the saturation value for the next cycle through the 
+ * main loop.  Another way to view this approach is to consider the phase
+ * accumulator as a fixed point 6b10 value, and the increment values as
+ * 0b10 additions into the accumulator.  This is important as it allows
+ * for more resolution when it comes to phase differences between the
+ * three colors.  This is a technique borrowed from "Direct Digital
+ * Synthesis".
+ *
+
+config.json file:
+
+{
+  "modes": [
+    {
+      "number": 1,
+      "name": "Fast",
+      "sine": 1,
+      "index": [
+        111,
+        86,
+        98,
+        31
+      ],
+      "delta": [
+        125,
+        93,
+        26,
+        0
+      ],
+      "lock": 1
+    },
+    {
+      "number": 2,
+      "name": "Medium",
+      "sine": 1,
+      "index": [
+        111,
+        86,
+        98,
+        31
+      ],
+      "delta": [
+        62,
+        47,
+        13,
+        0
+      ],
+      "lock": 1
+    },
+    {
+      "number": 3,
+      "name": "Slow",
+      "sine": 1,
+      "index": [
+        111,
+        86,
+        98,
+        31
+      ],
+      "delta": [
+        31,
+        23,
+        7,
+        0
+      ],
+      "lock": 1
+    },
+    {
+      "number": 4,
+      "name": "Glacial",
+      "sine": 1,
+      "index": [
+        111,
+        86,
+        98,
+        31
+      ],
+      "delta": [
+        15,
+        11,
+        3,
+        0
+      ],
+      "lock": 1
+    },
+    {
+      "number": 5,
+      "name": "Nightlight",
+      "sine": 0,
+      "color": [
+        255,
+        255,
+        255,
+        7
+      ],
+      "lock": 1
+    },
+    {
+      "number": 6,
+      "name": "Custom",
+      "sine": 0,
+      "color": [
+        255,
+        255,
+        255,
+        15
+      ],
+      "lock": 0
+    }
+  ]
+}
+
+*** 128 entry SINE lookup table -- AMPL = 120, OFFSET = 120 ***
+
+rom char *sine = {
+   0x78, 0x7D, 0x83, 0x89, 0x8F, 0x94, 0x9A, 0xA0,
+   0xA5, 0xAA, 0xB0, 0xB5, 0xBA, 0xBE, 0xC3, 0xC7,
+   0xCC, 0xD0, 0xD3, 0xD7, 0xDA, 0xDE, 0xE0, 0xE3,
+   0xE5, 0xE8, 0xE9, 0xEB, 0xEC, 0xED, 0xEE, 0xEE,
+   0xEF, 0xEE, 0xEE, 0xED, 0xEC, 0xEB, 0xE9, 0xE8,		// sine[0x20] MAX
+   0xE5, 0xE3, 0xE0, 0xDE, 0xDA, 0xD7, 0xD3, 0xD0,
+   0xCC, 0xC7, 0xC3, 0xBE, 0xBA, 0xB5, 0xB0, 0xAA,
+   0xA5, 0xA0, 0x9A, 0x94, 0x8F, 0x89, 0x83, 0x7D,
+   0x78, 0x73, 0x6D, 0x67, 0x61, 0x5C, 0x56, 0x50,
+   0x4B, 0x46, 0x40, 0x3B, 0x36, 0x32, 0x2D, 0x29,
+   0x24, 0x20, 0x1D, 0x19, 0x16, 0x12, 0x10, 0x0D,
+   0x0B, 0x08, 0x07, 0x05, 0x04, 0x03, 0x02, 0x02,
+   0x00, 0x02, 0x02, 0x03, 0x04, 0x05, 0x07, 0x08,		// sine[0x60] MIN
+   0x0B, 0x0D, 0x10, 0x12, 0x16, 0x19, 0x1D, 0x20,
+   0x24, 0x29, 0x2D, 0x32, 0x36, 0x3B, 0x40, 0x46,
+   0x4B, 0x50, 0x56, 0x5C, 0x61, 0x67, 0x6D, 0x73 };
+    
+char	red_ph_inc;		// phase increment for RED 
+char   	green_ph_inc;	// phase increment for GREEN 
+char	blue_ph_inc;	// phase increment for BLUE 
+char   	white_ph_inc;	// phase increment for WHITE 
+
+char   	red_pwm;		// pwm value from lookup table RED
+char   	green_pwm;		// pwm value from lookup table BLUE
+char   	blue_pwm;		// pwm value from lookup table GREEN
+char   	white_pwm;		// pwm value from lookup table WHITE
+
+char   	red_dim;		// dimming value for RED 
+char   	green_dim;		// dimming value for GREEN 
+char   	blue_dim;		// dimming value for BLUE 
+char   	white_dim;		// dimming value for WHITE 
+
+char   	red_IV_corr;	// I-V correction for RED 
+char   	green_IV_corr;	// I-V correction for GREEN 
+char   	blue_IV_corr;	// I-V correction for BLUE 
+char   	white_IV_corr;	// I-V correction for WHITE 
+
+int		red_phase@0x56;		// phase accumulator for RED
+char    red_ph_msb@0x57;	// hack to get msb without all those shifts!
+int		green_phase@0x58;	// phase accumulator for GREEN
+char    green_ph_msb@0x59;
+int		blue_phase@0x5a;	// phase accumulator for BLUE 
+char    blue_ph_msb@0x5b;
+int		white_phase@0x5c;	// phase accumulator for WHITE
+char    white_ph_msb@0x5d;
+
+int		temp16@0x5e;	// scratch int variable
+char    temp16_msb@0x5f;
+char	temp16_lsb@0x5e;
+char    temp8;			// scratch char variable
+
+char    hall_deb;		// debounce counter for HALL sensor input
+char	last_volt;		// last volt reading (to prevent E2 reads if same)
+char 	this_volt;
+char	cust_idx;		// index of custom color to overwrite (0..3)
+char	mode;			// mode change via hall sensor
+						// 0 = fast, 1 = medium, 2 = slow, 3 = glacial
+						// 4..7 = custom colors (EEPROM), 8 = WHITE
+
+
+/**********************************************************************
+ *  INIT_VARS
+ *  Set increment, phase, and PWM values depending on MODE
+ **********************************************************************/
+
+void INIT_VARS(void) {
+	if (mode > 3) {				//custom color modes (4...8)
+		temp8 = (mode - 4) << 2;	// form an index into the custom color arrays
+	    red_pwm = EEPROM_READ(RED_CUSTOM + temp8);
+		green_pwm = EEPROM_READ(GREEN_CUSTOM + temp8);	
+	    blue_pwm = EEPROM_READ(BLUE_CUSTOM + temp8);
+		white_pwm = EEPROM_READ(WHITE_CUSTOM + temp8);	
+		
+		red_ph_inc = 0;			// no phase increment for custom colors (they're static)
+		green_ph_inc = 0;
+		blue_ph_inc = 0;
+		white_ph_inc = 0;
+
+		red_dim = 0;			// no dimming for custom colors - the brightness is implied
+		green_dim = 0;
+		blue_dim = 0;
+		white_dim = 0;
+	}
+	else {						// color cycling modes (0...3)
+		red_ph_msb = EEPROM_READ(RED_TABL_IDX) << 1;	// get starting PWM value for each color
+		green_ph_msb = EEPROM_READ(GREEN_TABL_IDX) << 1;
+		blue_ph_msb = EEPROM_READ(BLUE_TABL_IDX) << 1;
+		white_ph_msb = EEPROM_READ(WHITE_TABL_IDX) << 1;
+		
+		red_pwm = 0;			// clear the PWM values prior to use - these will get updated
+		green_pwm = 0;			// after the first PWM cycle completes.  It's easier this way.
+		blue_pwm = 0;
+		white_pwm = 0;
+	}
+		
+	if ((mode == 0) || (mode == 2)) {  //fast
+		red_ph_inc = EEPROM_READ(RED_FAST_INC);
+		green_ph_inc = EEPROM_READ(GREEN_FAST_INC);
+		blue_ph_inc = EEPROM_READ(BLUE_FAST_INC);
+		white_ph_inc = EEPROM_READ(WHITE_FAST_INC);
+		
+		red_dim = EEPROM_READ(RED_FAST_DIM);
+		green_dim = EEPROM_READ(GREEN_FAST_DIM);
+		blue_dim = EEPROM_READ(BLUE_FAST_DIM);
+		white_dim = EEPROM_READ(WHITE_FAST_DIM);
+	}
+		
+	if ((mode == 1) || (mode == 3)) {   //med
+		red_ph_inc = EEPROM_READ(RED_MED_INC);
+		green_ph_inc = EEPROM_READ(GREEN_MED_INC);
+		blue_ph_inc = EEPROM_READ(BLUE_MED_INC);
+		white_ph_inc = EEPROM_READ(WHITE_MED_INC);
+		
+		red_dim = EEPROM_READ(RED_MED_DIM);
+		green_dim = EEPROM_READ(GREEN_MED_DIM);
+		blue_dim = EEPROM_READ(BLUE_MED_DIM);
+		white_dim = EEPROM_READ(WHITE_MED_DIM);
+	}
+		
+	if ((mode == 2) || (mode == 3)) {  //slow and glacial are 1/4 rate of fast and medium
+		red_ph_inc = red_ph_inc >> 2;
+		green_ph_inc = green_ph_inc >> 2;
+		blue_ph_inc = blue_ph_inc >> 2;
+		white_ph_inc = white_ph_inc >> 2;
+	}
+}
+
+/**********************************************************************
+ * PWM Output
+ * Turn each of three PORTC outputs on until TMR0 counter has exceeded
+ * the phase value for that output.  RC.0 is on for entire PWM cycle
+ **********************************************************************/
+void PWM_OUT()
+{
+	set_bit(portc,0);
+	if (red_pwm != 0) set_bit(portc,RED_LED);
+	if (green_pwm != 0) set_bit(portc,GREEN_LED);
+	if (blue_pwm != 0) set_bit(portc,BLUE_LED);
+	if (white_pwm != 0) set_bit(portc,WHITE_LED);
+	
+    tmr0 = 0;
+    while (tmr0 <= PERIOD) {
+		if (tmr0 >= red_pwm) clear_bit(portc,RED_LED);  
+		if (tmr0 >= green_pwm) clear_bit(portc,GREEN_LED);  
+		if (tmr0 >= blue_pwm) clear_bit(portc,BLUE_LED);  
+		if (tmr0 >= white_pwm) clear_bit(portc,WHITE_LED);  
+    }
+    portc &= 0xE0;
+}
+
+
+/**********************************************************************
+ * Adjust Duty
+ *
+ * Scale PWM1..4 values depending on the DIM1..4 factors.  A DIM value
+ * of 0 means no-dimming.  A DIM value of 0xFF is 255/256 brightness.
+ * A DIM value of 0x01 is 1/256 brightness.
+ *
+ * Scale PWM1..4 depending on the supply voltage detected.  If the
+ * voltage detected is different from that detected earlier, the scale
+ * factors are re-read from EEPROM.
+ **********************************************************************/
+void ADJUST_DUTY(void) {
+	if (red_dim != 0) {
+		temp16 = red_pwm * red_dim;
+		red_pwm = temp16_msb;
+	}
+		
+	if (green_dim != 0) {
+		temp16 = green_pwm * green_dim;
+		green_pwm = temp16_msb;
+	}
+
+	if (blue_dim != 0) {
+		temp16 = blue_pwm * blue_dim;
+		blue_pwm = temp16_msb;
+	}
+
+	if (white_dim != 0)	{
+		temp16 = white_pwm * white_dim;
+		white_pwm = temp16_msb;
+	}
+
+	this_volt = MEAS_VOLT();
+
+	if (last_volt != this_volt) {
+		red_IV_corr = EEPROM_READ(RED_CORR + this_volt);
+		green_IV_corr = EEPROM_READ(GREEN_CORR + this_volt);
+		blue_IV_corr = EEPROM_READ(BLUE_CORR + this_volt);
+		white_IV_corr = EEPROM_READ(WHITE_CORR + this_volt);
+		last_volt = this_volt;
+	}
+
+	temp16 = red_pwm * red_IV_corr;
+	red_pwm = temp16_msb;
+
+	temp16 = green_pwm * green_IV_corr;
+	green_pwm = temp16_msb;
+
+	temp16 = blue_pwm * blue_IV_corr;
+	blue_pwm = temp16_msb;
+		
+	temp16 = white_pwm * white_IV_corr;
+	white_pwm = temp16_msb;
+}
+
+main(void) {
+/* initialize PIC16F630 SFR */
+
+    option_reg = 0x05;	// enable RA pullups (RA5:0 are inputs)
+						// select CLKO as TMR0 source
+						// assign prescalar to TMR0
+						// set prescalar to 64 (101)
+	
+	vrcon = 0x80;		// enable the Voltage Reference
+	
+	trisc = 0x00;		// make RC0-RC5 outputs
+	trisa = 0x3e;		// make RA1-RA5 inputs
+	wpua = 0x36;		// enable RA1,2,4,5 pullups (RA3 is MCLR)
+		
+	cmcon = 0x14;       // RA1 is IN-, no COUT, INV output
+    portc = 0x00;		// set RC5:0 ouptut pins LOW
+	intcon = 0x00;		// disable all interrupts
+
+/* initialize variables */
+
+	red_IV_corr = 0;		// previous RED correction value
+	green_IV_corr = 0;		// previous GREEN correction value
+	blue_IV_corr = 0;		// previous BLUE correction value
+	white_IV_corr = 0;		// previous WHITE correction value
+	
+	cust_idx = 0;		// first custom color to overwrite
+	hall_deb = 0;		// Hall input debounce counter
+
+	last_volt = 16;		// last voltage range reading is invalid
+	
+	// determine mode to power-up into, and set display vars accordingly
+	
+	mode = EEPROM_READ(INIT_MODE);	
+	if (mode > CUSTOM + 4) mode = 0;  // four modes (0..3,LAMP) + # custom
+	INIT_VARS();		
+
+/* main loop */
+	while(1) {
+		ADJUST_DUTY();	// adjust the PWM values for VBAT, dimming %
+		PWM_OUT();  	// do the PWM display function
+	
+		if (mode < 4) {	// calculate the PWM values for the next cycle
+			temp8 = red_ph_inc;
+			red_phase = red_phase + temp8;
+			temp8 = red_ph_msb >> 1;
+			red_pwm = sine[(temp8 & 127)];
+	
+			temp8 = green_ph_inc;
+			green_phase = green_phase + temp8;		// add increment into phase accumulator
+			temp8 = green_ph_msb >> 1;		    // get upper bits of phase accumulator into temp
+			green_pwm = sine[(temp8 & 127)];	// use temp%128 as index into Sine lookup table
+	
+			temp8 = blue_ph_inc;
+			blue_phase = blue_phase + temp8;
+			temp8 = blue_ph_msb >> 1;
+			blue_pwm = sine[(temp8 & 127)];		 
+	
+			temp8 = white_ph_inc;
+			white_phase = white_phase + temp8;
+			temp8 = white_ph_msb >> 1;
+			white_pwm = sine[(temp8 & 127)];		 
+		}
+		else INIT_VARS();
+			
+		// allow Hall to debounce for 30 cycles while display active
+			
+		if (HALL_INPUT == 0) hall_deb++;
+			else hall_deb = 0;
+		
+		// once Hall is active for more than 30 cycles, blank display
+		// as long as Hall is active, or 240 cycles, whichever comes first.
+		
+		if (hall_deb > 30) {
+			while ((HALL_INPUT == 0) && (hall_deb <= 240)) {
+				delay_ms(16);  // about the same as a cycle loop...
+				hall_deb++;
+			}
+				
+			// if Hall was active for less than 240 cycles, change mode
+			// and save new mode into EEPROM as initial power-on mode.
+				
+			if (hall_deb <= 240) {
+				mode++;
+				if (mode > CUSTOM + 4) mode = 0;
+				EEPROM_WRITE(INIT_MODE, mode);
+			}
+				
+			// otherwise, overwrite a custom color with current color,
+			// and then flash display # of times corresponding to the
+			// custom color that was overwritten (1..4).  Note that the
+			// Hall could STILL be active, so it must be negated prior to
+			// leaving this section of code.
+				
+			else {
+				temp8 = cust_idx << 2;
+				EEPROM_WRITE(RED_CUSTOM + temp8, red_pwm);
+				EEPROM_WRITE(GREEN_CUSTOM + temp8, green_pwm);	
+				EEPROM_WRITE(BLUE_CUSTOM + temp8, blue_pwm);
+				EEPROM_WRITE(WHITE_CUSTOM + temp8, white_pwm);	
+				
+				ADJUST_DUTY();
+				for(temp8 = 0; temp8 <= cust_idx; temp8++) {
+					PWM_OUT();
+					PWM_OUT();
+					PWM_OUT();
+					PWM_OUT();
+					delay_ms(200);
+				}
+				cust_idx++;
+				if (cust_idx >= CUSTOM) cust_idx = 0;
+				
+				while (HALL_INPUT == 0);
+			}
+				
+			// reset the Hall debounce counter and re-init display
+				
+			hall_deb = 0;
+			INIT_VARS();		
+		}
+	}	
+}
+
+
+
+
+Red phase
+64342
+Red value
+92
+Display Mode
+0
+Red phase
+64467
+Red value
+92
+Display Mode
+0
+Red phase
+64592
+Red value
+97
+Display Mode
+0
+Red phase
+64717
+Red value
+97
+Display Mode
+0
+Red phase
+64842
+Red value
+103
+Display Mode
+0
+Red phase
+64967
+Red value
+103
+Display Mode
+0
+Red phase
+65092
+Red value
+109
+Display Mode
+0
+Red phase
+65217
+Red value
+109
+Display Mode
+0
+Red phase
+65342
+Red value
+115
+Display Mode
+0
+Red phase
+65467
+Red value
+115
+Display Mode
+0
+Red phase
+56
+Red value
+120
+Display Mode
+0
+Red phase
+181
+Red value
+120
+Display Mode
+0
+Red phase
+306
+Red value
+125
+Display Mode
+0
+Red phase
+431
+Red value
+125
+Display Mode
+0
+Red phase
+556
+Red value
+131
+Display Mode
+0
+Red phase
+681
+Red value
+131
+Display Mode
+0
+Red phase
+806
+Red value
+137
+Display Mode
+0
+Red phase
+931
+Red value
+137
+Display Mode
+0
+Red phase
+1056
+Red value
+143
+Display Mode
+0
+Red phase
+1181
+Red value
+143
+Display Mode
+0
+Red phase
+1306
+Red value
+148
+Display Mode
+0
+Red phase
+1431
+Red value
+148
+Display Mode
+0
+Red phase
+1556
+Red value
+154
+Display Mode
+0
+Red phase
+1681
+Red value
+154
+Display Mode
+0
+Red phase
+1806
+Red value
+160
+Display Mode
+0
+Red phase
+1931
+Red value
+160
+Display Mode
+0
+Red phase
+2056
+Red value
+165
+Display Mode
+0
+Red phase
+2181
+Red value
+165
+Display Mode
+0
+Red phase
+2306
+Red value
+170
+Display Mode
+0
+Red phase
+2431
+Red value
+170
+Display Mode
+0
+Red phase
+2556
+Red value
+170
+Display Mode
+0
+Red phase
+2681
+Red value
+176
+Display Mode
+0
+Red phase
+2806
+Red value
+176
+Display Mode
+0
+Red phase
+2931
+Red value
+181
+Display Mode
+0
+Red phase
+3056
+Red value
+181
+Display Mode
+0
+Red phase
+3181
+Red value
+186
+Display Mode
+0
+Red phase
+3306
+Red value
+186
+Display Mode
+0
+Red phase
+3431
+Red value
+190
+Display Mode
+0
+Red phase
+3556
+Red value
+190
+Display Mode
+0
+Red phase
+3681
+Red value
+195
+Display Mode
+0
+Red phase
+3806
+Red value
+195
+Display Mode
+0
+Red phase
+3931
+Red value
+199
+Display Mode
+0
+Red phase
+4056
+Red value
+199
+Display Mode
+0
+Red phase
+4181
+Red value
+204
+Display Mode
+0
+Red phase
+4306
+Red value
+204
+Display Mode
+0
+Red phase
+4431
+Red value
+208
+Display Mode
+0
+Red phase
+4556
+Red value
+208
+Display Mode
+0
+Red phase
+4681
+Red value
+211
+Display Mode
+0
+Red phase
+4806
+Red value
+211
+Display Mode
+0
+Red phase
+4931
+Red value
+215
+Display Mode
+0
+Red phase
+5056
+Red value
+215
+Display Mode
+0
+Red phase
+5181
+Red value
+218
+Display Mode
+0
+Red phase
+5306
+Red value
+218
+Display Mode
+0
+Red phase
+5431
+Red value
+222
+Display Mode
+0
+Red phase
+5556
+Red value
+222
+Display Mode
+0
+Red phase
+5681
+Red value
+224
+Display Mode
+0
+Red phase
+5806
+Red value
+224
+Display Mode
+0
+Red phase
+5931
+Red value
+227
+Display Mode
+0
+Red phase
+6056
+Red value
+227
+Display Mode
+0
+Red phase
+6181
+Red value
+229
+Display Mode
+0
+Red phase
+6306
+Red value
+229
+Display Mode
+0
+Red phase
+6431
+Red value
+232
+Display Mode
+0
+Red phase
+6556
+Red value
+232
+Display Mode
+0
+Red phase
+6681
+Red value
+233
+Display Mode
+0
+Red phase
+6806
+Red value
+233
+Display Mode
+0
+Red phase
+6931
+Red value
+235
+Display Mode
+0
+Red phase
+7056
+Red value
+235
+Display Mode
+0
+Red phase
+7181
+Red value
+236
+Display Mode
+0
+Red phase
+7306
+Red value
+236
+Display Mode
+0
+Red phase
+7431
+Red value
+237
+Display Mode
+0
+Red phase
+7556
+Red value
+237
+Display Mode
+0
+Red phase
+7681
+Red value
+238
+Display Mode
+0
+Red phase
+7806
+Red value
+238
+Display Mode
+0
+Red phase
+7931
+Red value
+238
+Display Mode
+0
+Red phase
+8056
+Red value
+238
+Display Mode
+0
+Red phase
+8181
+Red value
+238
+Display Mode
+0
+Red phase
+8306
+Red value
+239
+Display Mode
+0
+Red phase
+8431
+Red value
+239
+Display Mode
+0
+Red phase
+8556
+Red value
+238
+Display Mode
+0
+Red phase
+8681
+Red value
+238
+Display Mode
+0
+Red phase
+8806
+Red value
+238
+Display Mode
+0
+Red phase
+8931
+Red value
+238
+Display Mode
+0
+Red phase
+9056
+Red value
+237
+Display Mode
+0
+Red phase
+9181
+Red value
+237
+Display Mode
+0
+Red phase
+9306
+Red value
+236
+Display Mode
+0
+Red phase
+9431
+Red value
+236
+Display Mode
+0
+Red phase
+9556
+Red value
+235
+Display Mode
+0
+Red phase
+9681
+Red value
+235
+Display Mode
+0
+Red phase
+9806
+Red value
+233
+Display Mode
+0
+Red phase
+9931
+Red value
+233
+Display Mode
+0
+Red phase
+10056
+Red value
+232
+Display Mode
+0
+Red phase
+10181
+Red value
+232
+Display Mode
+0
+Red phase
+10306
+Red value
+229
+Display Mode
+0
+Red phase
+10431
+Red value
+229
+Display Mode
+0
+Red phase
+10556
+Red value
+227
+Display Mode
+0
+Red phase
+10681
+Red value
+227
+Display Mode
+0
+Red phase
+10806
+Red value
+224
+Display Mode
+0
+Red phase
+10931
+Red value
+224
+Display Mode
+0
+Red phase
+11056
+Red value
+222
+Display Mode
+0
+Red phase
+11181
+Red value
+222
+Display Mode
+0
+Red phase
+11306
+Red value
+218
+Display Mode
+0
+Red phase
+11431
+Red value
+218
+Display Mode
+0
+Red phase
+11556
+Red value
+215
+Display Mode
+0
+Red phase
+11681
+Red value
+215
+Display Mode
+0
+Red phase
+11806
+Red value
+211
+Display Mode
+0
+Red phase
+11931
+Red value
+211
+Display Mode
+0
+Red phase
+12056
+Red value
+208
+Display Mode
+0
+Red phase
+12181
+Red value
+208
+Display Mode
+0
+Red phase
+12306
+Red value
+204
+Display Mode
+0
+Red phase
+12431
+Red value
+204
+Display Mode
+0
+Red phase
+12556
+Red value
+199
+Display Mode
+0
+Red phase
+12681
+Red value
+199
+Display Mode
+0
+Red phase
+12806
+Red value
+195
+Display Mode
+0
+Red phase
+12931
+Red value
+195
+Display Mode
+0
+Red phase
+13056
+Red value
+190
+Display Mode
+0
+Red phase
+13181
+Red value
+190
+Display Mode
+0
+Red phase

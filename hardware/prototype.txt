@@ -1,0 +1,18 @@
+Status of prototype:
+
+PCB received 1/8/2023
+PCB assembled 1/16/2023
+
+Observations: 
+pads for Micro USB were easy enough to work with
+might want to put a hole in pads beneath USB shield body to allow soldering from backside.
+including a JST connector for 5V would make power wiring easier when USB not needed
+
+Arduino test code 1/16/2023 (Arduino IDE)
+upload via CH340 USB bridge and reset circuit works
+SK9822 LED array works
+
+Arduino test code 1/17/2023 (PlatformIO)
+sometimes upload of a running target is a bit tricky/erratic and needs manual reset
+
+
